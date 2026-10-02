@@ -9,7 +9,7 @@ dsh_plugin_toolkit.py —— DSH 插件安装 + 插件数据搬迁工具
 
 本脚本还原自一次真实操作（2026-10-01 ~ 10-02），下面每条都是实际踩过的坑：
 
-  1. 装插件要用【桌面版自带的 CLI】。PATH 上那个 %APPDATA%\\npm 里的
+  1. 装插件要用【桌面版自带的 CLI】。PATH 上那个 %APPDATA%\npm 里的
      全局 dsh 是旧版本，用它装/启动会直接崩。
   2. DSH 有【兼容性闸门】：插件（或它依赖的核心包）声明的 peer 版本
      和运行时对不上，安装会被拒绝并【自动回滚】。
@@ -53,12 +53,13 @@ from pathlib import Path
 # CONFIG —— 换机器只需要改这一段
 # ============================================================================
 
-DSH_ROOT = Path(r"D:\deepseek_manager")          # 桌面版安装目录
+# 【修改1】将安装目录和迁移目标目录区分开，避免混淆
+DSH_ROOT = Path(r"D:\DSH_Install")              # 桌面版安装目录（按需修改）
 DSH_HOME = Path(os.environ.get("DSH_HOME", Path.home() / ".dsh"))
 PROFILE = "desktop"                              # 要管理的 profile 名
 
 # 插件相关文件统一搬到这个目录下
-PLUGIN_DIR = Path(r"D:\deepseek插件")
+PLUGIN_DIR = Path(r"D:\DSH_Plugins")             # 迁移目标根目录（按需修改）
 DATA_SUBDIR = PLUGIN_DIR / "插件数据"            # 插件运行时数据
 STORE_DIR = PLUGIN_DIR / ".pnpm-store"           # pnpm 内容寻址缓存
 
@@ -217,7 +218,7 @@ def install_plugin(spec: str, profile: str = PROFILE, exemptions: list[str] | No
     spec 可以是：
       - npm 包名            "dsh-whale-widget"
       - npm 带版本          "@deepseek-harness-tui/dsh-tui@0.12.0"
-      - 本地目录（绝对路径） "D:\\deepseek插件\\dshmarket"   → pnpm 会记成 link:
+      - 本地目录（绝对路径） "D:\\DSH_Plugins"   → pnpm 会记成 link:
       - GitHub              "github:owner/repo"
 
     exemptions: 遇到 "incompatible" 拒绝时，允许放行的精确版本列表，
@@ -311,7 +312,7 @@ def migrate_dir(name: str, src: Path, dst_parent: Path) -> bool:
     把一个目录搬到 D 盘，原位置留一个链接。六步走，任何一步失败就回滚。
 
     这一步等价于：
-        C:\\Users\\...\\.dsh\\<name>   ──[Junction]──►   D:\\deepseek插件\\...\\<name>
+        C:MyPluginFolder   ──►   D:DSH_Plugins
     插件照原路径读写，完全感觉不到差别。
     """
     if name in CANNOT_MOVE:
@@ -353,10 +354,17 @@ def migrate_dir(name: str, src: Path, dst_parent: Path) -> bool:
         return False
 
     # 3) 改名留底（不删！这样出问题能一键还原）
+    # 【修改2】增加异常处理，防止文件被占用导致脚本崩溃
     if DRY_RUN:
         print(f"  [dry-run] 改名 {src} -> {bak}")
     else:
-        os.rename(src, bak)
+        try:
+            os.rename(src, bak)
+        except OSError as e:
+            print(f"  ✗ 重命名失败（可能是文件正在被占用），停止迁移并清理已复制的目标：{e}")
+            if not DRY_RUN:
+                shutil.rmtree(dst, ignore_errors=True)
+            return False
 
     # 4) 建链接
     try:
@@ -364,7 +372,10 @@ def migrate_dir(name: str, src: Path, dst_parent: Path) -> bool:
     except Exception as e:
         print(f"  ✗ 建链接失败，回滚：{e}")
         if not DRY_RUN:
-            os.rename(bak, src)
+            try:
+                os.rename(bak, src)
+            except OSError:
+                print("  ✗ 回滚重命名也失败，请手动将 .old 文件夹改回原名。")
             shutil.rmtree(dst, ignore_errors=True)
         return False
 
@@ -374,8 +385,11 @@ def migrate_dir(name: str, src: Path, dst_parent: Path) -> bool:
     if n_via != n_src:
         print("  ✗ 链接读到的内容不对，回滚")
         if not DRY_RUN:
-            remove_junction(src)
-            os.rename(bak, src)
+            try:
+                remove_junction(src)
+                os.rename(bak, src)
+            except OSError:
+                print("  ✗ 回滚操作失败，请手动恢复。")
             shutil.rmtree(dst, ignore_errors=True)
         return False
 
@@ -485,8 +499,9 @@ def write_readme() -> None:
         "而把 @deepseek-ai 补进 profile 自己的 node_modules，又会让 DSH 把宿主的",
         "核心插件行（llm、session 等）判为版本不兼容并禁用。两条路都不通。",
         "", "-" * 50, "【重要提醒】", "-" * 50,
-        "1. 不要改名 / 移动 / 删除 node_modules\\ 和 插件数据\\，它们都被链接指着。",
-        "2. 不要移动或改名整个 D:\\deepseek插件 文件夹，也不要让 D 盘不可用。",
+        # 【修改3】将硬编码路径改为动态变量，防止脱敏后泄露真实路径
+        f"1. 不要改名 / 移动 / 删除 node_modules\\ 和 插件数据\\，它们都被链接指着。",
+        f"2. 不要移动或改名整个 {PLUGIN_DIR} 文件夹，也不要让 D 盘不可用。",
         "3. 在市场里装 / 卸插件会自动反映到 node_modules\\，不用手动管。",
         "4. 插件的设置与数据仍按原路径读写，只是背后真实落在 D 盘。",
     ]
